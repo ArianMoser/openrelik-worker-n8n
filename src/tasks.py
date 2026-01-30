@@ -5,7 +5,7 @@ from celery.utils.log import get_task_logger
 
 # API docs - https://openrelik.github.io/openrelik-worker-common/openrelik_worker_common/index.html
 from openrelik_worker_common.file_utils import create_output_file
-from openrelik_worker_common.logging import Logger
+from openrelik_common.logging import Logger
 from openrelik_worker_common.task_utils import create_task_result, get_input_files
 
 from .app import celery
@@ -33,6 +33,7 @@ TASK_METADATA = {
 log_root = Logger()
 logger = log_root.get_logger(__name__, get_task_logger(__name__))
 
+
 @signals.task_prerun.connect
 def on_task_prerun(sender, task_id, task, args, kwargs, **_):
     log_root.bind(
@@ -40,6 +41,7 @@ def on_task_prerun(sender, task_id, task, args, kwargs, **_):
         task_name=task.name,
         worker_name=TASK_METADATA.get("display_name"),
     )
+
 
 @celery.task(bind=True, name=TASK_NAME, metadata=TASK_METADATA)
 def command(
@@ -82,11 +84,15 @@ def command(
 
         # Run the command
         with open(output_file.path, "w") as fh:
-            subprocess.Popen(command, stdout=fh, stderr=subprocess.PIPE)
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            logger.info(process.stdout.read())
         if process.stderr:
             logger.error(process.stderr.read())
-        
+
         output_files.append(output_file.to_dict())
+
+    logger.info(f"Finished {TASK_NAME} for workflow {workflow_id}")
 
     return create_task_result(
         output_files=output_files,
