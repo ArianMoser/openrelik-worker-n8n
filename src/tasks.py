@@ -1,5 +1,6 @@
-import subprocess
+import json
 
+import requests
 from celery import signals
 from celery.utils.log import get_task_logger
 
@@ -11,20 +12,25 @@ from openrelik_worker_common.task_utils import create_task_result, get_input_fil
 from .app import celery
 
 # Task name used to register and route the task to the correct queue.
-TASK_NAME = "openrelik-worker-TEMPLATEWORKERNAME.tasks.your_task_name"
+TASK_NAME = "openrelik-worker-n8n.tasks.push_to_n8n"
 
 # Task metadata for registration in the core system.
 TASK_METADATA = {
-    "display_name": "openrelik-worker-TEMPLATEWORKERNAME",
-    "description": "TEMPLATEDESC",
-    # Configuration that will be rendered as a web for in the UI, and any data entered
-    # by the user will be available to the task function when executing (task_config).
+    "display_name": "openrelik-worker-n8n",
+    "description": "Trigger a n8n workflow via webhook for further processing",
     "task_config": [
         {
-            "name": "<REPLACE_WITH_NAME>",
-            "label": "<REPLACE_WITH_LABEL>",
-            "description": "<REPLACE_WITH_DESCRIPTION>",
-            "type": "<REPLACE_WITH_TYPE>",  # Types supported: text, textarea, checkbox
+            "name": "webhook_url",
+            "label": "n8n Webhook URL",
+            "description": "The n8n webhook URL to POST data to",
+            "type": "text",
+            "required": True,
+        },
+        {
+            "name": "verify_ssl",
+            "label": "Verify SSL certificate",
+            "description": "Uncheck to allow self-signed or HTTP endpoints",
+            "type": "checkbox",
             "required": False,
         },
     ],
@@ -52,7 +58,7 @@ def command(
     workflow_id: str = None,
     task_config: dict = None,
 ) -> str:
-    """Run <REPLACE_WITH_COMMAND> on input files.
+    """POST each input file to an n8n webhook and save the response.
 
     Args:
         pipe_result: Base64-encoded result from the previous Celery task, if any.
@@ -64,31 +70,55 @@ def command(
     Returns:
         Base64-encoded dictionary containing task results.
     """
-    # Setup logger
     log_root.bind(workflow_id=workflow_id)
     logger.info(f"Starting {TASK_NAME} for workflow {workflow_id}")
 
     input_files = get_input_files(pipe_result, input_files or [])
+    webhook_url = (task_config or {}).get("webhook_url", "")
+    verify_ssl = (task_config or {}).get("verify_ssl", True)
     output_files = []
-    base_command = ["<REPLACE_WITH_COMMAND>"]
-    base_command_string = " ".join(base_command)
 
     for input_file in input_files:
+        display_name = input_file.get("display_name", "file")
+        file_path = input_file.get("path")
+
+        logger.info(f"Sending {display_name} to {webhook_url}")
+
+        with open(file_path, "rb") as fh:
+            file_content = fh.read()
+
+        response = requests.post(
+            webhook_url,
+            files={"file": (display_name, file_content)},
+            data={
+                "display_name": display_name,
+                "workflow_id": workflow_id or "",
+                "data_type": input_file.get("data_type", ""),
+            },
+            timeout=60,
+            verify=verify_ssl,
+        )
+        response.raise_for_status()
+
+        logger.info(f"n8n responded {response.status_code} for {display_name}")
+
         output_file = create_output_file(
             output_path,
-            display_name=input_file.get("display_name"),
-            extension="<REPLACE_WITH_FILE_EXTENSION>",
-            data_type="<[OPTIONAL]_REPLACE_WITH_DATA_TYPE>",
+            display_name=display_name,
+            extension="json",
+            data_type="openrelik:n8n:webhook_response",
         )
-        command = base_command + [input_file.get("path")]
-
-        # Run the command
         with open(output_file.path, "w") as fh:
-            process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-            logger.info(process.stdout.read())
-        if process.stderr:
-            logger.error(process.stderr.read())
+            json.dump(
+                {
+                    "webhook_url": webhook_url,
+                    "file": display_name,
+                    "status_code": response.status_code,
+                    "response": response.text,
+                },
+                fh,
+                indent=2,
+            )
 
         output_files.append(output_file.to_dict())
 
@@ -97,6 +127,6 @@ def command(
     return create_task_result(
         output_files=output_files,
         workflow_id=workflow_id,
-        command=base_command_string,
+        command=f"POST {webhook_url}",
         meta={},
     )
